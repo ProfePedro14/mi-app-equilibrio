@@ -123,10 +123,27 @@ export default function App() {
     for (const s of rx.species) {
       initC[s.id] = s.initialConcentration;
     }
+    const initRates = calculateRates(rx, initC, calculateKc(rx, rx.defaultTemp), 1.0);
+    const initQc = calculateQc(rx, initC);
+    const initKc = calculateKc(rx, rx.defaultTemp);
+    const initP = calculatePressure(initC, rx.defaultTemp, rx.defaultVolume);
+
     setInitialConcentrations(initC);
     setCurrentConcentrations(initC);
     setSimTime(0);
-    setHistory([]);
+    setHistory([
+      {
+        t: 0,
+        concentrations: initC,
+        rates: initRates,
+        Qc: initQc,
+        Kc: initKc,
+        isEquilibrium: checkEquilibrium(initRates, initQc, initKc),
+        volume: rx.defaultVolume,
+        temperature: rx.defaultTemp,
+        pressure: initP,
+      },
+    ]);
     setPerturbations([]);
     setLastExplanation(null);
     setIsPlaying(true);
@@ -134,12 +151,30 @@ export default function App() {
 
   // Reset current reaction to initial values
   const handleReset = () => {
-    setCurrentConcentrations({ ...initialConcentrations });
+    const initC = { ...initialConcentrations };
+    const initKc = calculateKc(selectedReaction, selectedReaction.defaultTemp);
+    const initRates = calculateRates(selectedReaction, initC, initKc, 1.0);
+    const initQc = calculateQc(selectedReaction, initC);
+    const initP = calculatePressure(initC, selectedReaction.defaultTemp, selectedReaction.defaultVolume);
+
+    setCurrentConcentrations(initC);
     setVolume(selectedReaction.defaultVolume);
     setTemperature(selectedReaction.defaultTemp);
     setCatalystActive(false);
     setSimTime(0);
-    setHistory([]);
+    setHistory([
+      {
+        t: 0,
+        concentrations: initC,
+        rates: initRates,
+        Qc: initQc,
+        Kc: initKc,
+        isEquilibrium: checkEquilibrium(initRates, initQc, initKc),
+        volume: selectedReaction.defaultVolume,
+        temperature: selectedReaction.defaultTemp,
+        pressure: initP,
+      },
+    ]);
     setPerturbations([]);
     setLastExplanation(null);
     setIsPlaying(true);
@@ -360,21 +395,46 @@ export default function App() {
           const p = calculatePressure(nextC, temperature, volume);
 
           setHistory((prevH) => {
-            const nextHistory = [
-              ...prevH.slice(-180),
-              {
-                t: nextTime,
-                concentrations: nextC,
-                rates,
-                Qc: qc,
-                Kc: currentKc,
-                isEquilibrium: isEq,
-                volume,
-                temperature,
-                pressure: p,
-              },
-            ];
-            return nextHistory;
+            const newPoint: TimePoint = {
+              t: nextTime,
+              concentrations: nextC,
+              rates,
+              Qc: qc,
+              Kc: currentKc,
+              isEquilibrium: isEq,
+              volume,
+              temperature,
+              pressure: p,
+            };
+
+            let baseH = prevH;
+            // Ensure t=0 starting point is present on very first tick
+            if (baseH.length === 0) {
+              const initRates = calculateRates(selectedReaction, prevC, currentKc, cat);
+              const initQc = calculateQc(selectedReaction, prevC);
+              baseH = [
+                {
+                  t: 0,
+                  concentrations: prevC,
+                  rates: initRates,
+                  Qc: initQc,
+                  Kc: currentKc,
+                  isEquilibrium: checkEquilibrium(initRates, initQc, currentKc),
+                  volume,
+                  temperature,
+                  pressure: calculatePressure(prevC, temperature, volume),
+                },
+              ];
+            }
+
+            if (baseH.length >= 450) {
+              // Compact older points while preserving t=0 and recent resolution
+              const older = baseH.slice(0, 320).filter((_, idx) => idx === 0 || idx % 2 === 0);
+              const recent = baseH.slice(320);
+              return [...older, ...recent, newPoint];
+            }
+
+            return [...baseH, newPoint];
           });
 
           return nextC;

@@ -103,9 +103,8 @@ export const PressureComparisonView: React.FC = () => {
           const qc = calculateQc(rxHI, nextC);
           const p = calculatePressure(nextC, rxHI.defaultTemp, volume);
 
-          setHistoryHI((h) => [
-            ...h.slice(-120),
-            {
+          setHistoryHI((h) => {
+            const pt: TimePoint = {
               t: nextT,
               concentrations: nextC,
               rates: { forward: 0, reverse: 0 },
@@ -115,8 +114,17 @@ export const PressureComparisonView: React.FC = () => {
               volume,
               temperature: rxHI.defaultTemp,
               pressure: p,
-            },
-          ]);
+            };
+            let base = h;
+            if (base.length === 0) {
+              base = [{ ...pt, t: 0, concentrations: prevC }];
+            }
+            if (base.length >= 360) {
+              const older = base.slice(0, 240).filter((_, idx) => idx === 0 || idx % 2 === 0);
+              return [...older, ...base.slice(240), pt];
+            }
+            return [...base, pt];
+          });
           return nextC;
         });
 
@@ -126,9 +134,8 @@ export const PressureComparisonView: React.FC = () => {
           const qc = calculateQc(rxHaber, nextC);
           const p = calculatePressure(nextC, rxHaber.defaultTemp, volume);
 
-          setHistoryNH3((h) => [
-            ...h.slice(-120),
-            {
+          setHistoryNH3((h) => {
+            const pt: TimePoint = {
               t: nextT,
               concentrations: nextC,
               rates: { forward: 0, reverse: 0 },
@@ -138,8 +145,17 @@ export const PressureComparisonView: React.FC = () => {
               volume,
               temperature: rxHaber.defaultTemp,
               pressure: p,
-            },
-          ]);
+            };
+            let base = h;
+            if (base.length === 0) {
+              base = [{ ...pt, t: 0, concentrations: prevC }];
+            }
+            if (base.length >= 360) {
+              const older = base.slice(0, 240).filter((_, idx) => idx === 0 || idx % 2 === 0);
+              return [...older, ...base.slice(240), pt];
+            }
+            return [...base, pt];
+          });
           return nextC;
         });
 
@@ -166,7 +182,9 @@ export const PressureComparisonView: React.FC = () => {
     const gw = width - pad.left - pad.right;
     const gh = height - pad.top - pad.bottom;
 
-    const maxT = Math.max(10, ...history.map((h) => h.t));
+    const minT = history.length > 0 ? history[0].t : 0;
+    const maxT = Math.max(minT + 10, ...history.map((h) => h.t));
+    const tSpan = Math.max(1e-4, maxT - minT);
     let maxC = 0.5;
     for (const h of history) {
       for (const v of Object.values(h.concentrations)) {
@@ -175,7 +193,7 @@ export const PressureComparisonView: React.FC = () => {
     }
     maxC = Math.ceil(maxC * 1.15 * 10) / 10;
 
-    const xs = (t: number) => pad.left + (t / maxT) * gw;
+    const xs = (t: number) => pad.left + ((t - minT) / tSpan) * gw;
     const ys = (c: number) => pad.top + gh - (c / maxC) * gh;
 
     return (
@@ -220,6 +238,21 @@ export const PressureComparisonView: React.FC = () => {
                 {(pct * maxC).toFixed(1)}
               </text>
             </g>
+          ))}
+
+          {/* X Axis Time Labels */}
+          {[0, 0.5, 1].map((pct) => (
+            <text
+              key={pct}
+              x={pad.left + gw * pct}
+              y={pad.top + gh + 14}
+              fill="#94a3b8"
+              fontSize="9"
+              textAnchor="middle"
+              fontFamily="monospace"
+            >
+              {(minT + pct * tSpan).toFixed(0)}s
+            </text>
           ))}
 
           {/* Perturbation vertical line */}

@@ -5,7 +5,7 @@
 
 import React, { useState, useMemo } from 'react';
 import { ReactionConfig, TimePoint, PerturbationEvent } from '../types/equilibrium';
-import { Activity, Clock, Zap, Layers, Sparkles } from 'lucide-react';
+import { Activity, Clock, Zap, Layers, Maximize2 } from 'lucide-react';
 
 interface EquilibriumChartProps {
   reaction: ReactionConfig;
@@ -23,51 +23,88 @@ export const EquilibriumChart: React.FC<EquilibriumChartProps> = ({
   isEquilibrium,
 }) => {
   const [viewMode, setViewMode] = useState<'concentrations' | 'rates'>('concentrations');
+  const [timeAxisMode, setTimeAxisMode] = useState<'full' | 'sliding'>('full');
   const [hoveredPoint, setHoveredPoint] = useState<TimePoint | null>(null);
+
+  const SLIDING_WINDOW_SECONDS = 25;
 
   // Chart dimensions
   const width = 800;
-  const height = 360;
-  const padding = { top: 40, right: 30, bottom: 45, left: 65 };
+  const height = 350;
+  const padding = { top: 36, right: 24, bottom: 44, left: 62 };
   const graphWidth = width - padding.left - padding.right;
   const graphHeight = height - padding.top - padding.bottom;
 
-  // Compute maximum values for scaling
-  const maxTime = Math.max(10, ...history.map((p) => p.t));
+  // Compute time bounds and visible points depending on selected time axis mode
+  const latestTime = history.length > 0 ? history[history.length - 1].t : currentTime;
+
+  const minTime = useMemo(() => {
+    if (timeAxisMode === 'sliding' && latestTime > SLIDING_WINDOW_SECONDS) {
+      return latestTime - SLIDING_WINDOW_SECONDS;
+    }
+    return 0;
+  }, [timeAxisMode, latestTime]);
+
+  const maxTime = useMemo(() => {
+    if (timeAxisMode === 'sliding') {
+      return Math.max(SLIDING_WINDOW_SECONDS, latestTime);
+    }
+    // In full mode, scale smoothly from 10s upward
+    return Math.max(10, latestTime);
+  }, [timeAxisMode, latestTime]);
+
+  const visibleHistory = useMemo(() => {
+    if (timeAxisMode === 'full') return history;
+    return history.filter((pt) => pt.t >= minTime - 0.5);
+  }, [history, timeAxisMode, minTime]);
 
   const maxConcentration = useMemo(() => {
     let maxC = 0.5;
-    for (const p of history) {
+    const source = visibleHistory.length > 0 ? visibleHistory : history;
+    for (const p of source) {
       for (const val of Object.values(p.concentrations)) {
         if (val > maxC) maxC = val;
       }
     }
-    return Math.ceil((maxC * 1.15) * 10) / 10;
-  }, [history]);
+    return Math.ceil(maxC * 1.15 * 10) / 10;
+  }, [visibleHistory, history]);
 
   const maxRate = useMemo(() => {
     let maxR = 0.05;
-    for (const p of history) {
+    const source = visibleHistory.length > 0 ? visibleHistory : history;
+    for (const p of source) {
       if (p.rates.forward > maxR) maxR = p.rates.forward;
       if (p.rates.reverse > maxR) maxR = p.rates.reverse;
     }
-    return Math.ceil((maxR * 1.25) * 100) / 100;
-  }, [history]);
+    return Math.ceil(maxR * 1.25 * 100) / 100;
+  }, [visibleHistory, history]);
 
   // Coordinate transforms
-  const xScale = (t: number) => padding.left + (t / maxTime) * graphWidth;
+  const timeSpan = Math.max(1e-4, maxTime - minTime);
+  const xScale = (t: number) => padding.left + ((t - minTime) / timeSpan) * graphWidth;
   const yConcScale = (c: number) => padding.top + graphHeight - (c / maxConcentration) * graphHeight;
   const yRateScale = (r: number) => padding.top + graphHeight - (r / maxRate) * graphHeight;
 
-  // Find when equilibrium was first reached in current segment
+  // Find when equilibrium starts in the latest contiguous equilibrium segment
   const equilibriumStartPoint = useMemo(() => {
-    return history.find((p) => p.isEquilibrium);
-  }, [history]);
+    const pts = visibleHistory;
+    if (pts.length === 0) return undefined;
+    // Find the first point of the current equilibrium run (after last non-equilibrium point)
+    let lastNonEqIdx = -1;
+    for (let i = pts.length - 1; i >= 0; i--) {
+      if (!pts[i].isEquilibrium) {
+        lastNonEqIdx = i;
+        break;
+      }
+    }
+    if (lastNonEqIdx === pts.length - 1) return undefined;
+    return pts[lastNonEqIdx + 1];
+  }, [visibleHistory]);
 
   // Generate SVG path for a species concentration
   const generateConcentrationPath = (speciesId: string) => {
-    if (history.length === 0) return '';
-    return history.reduce((path, pt, index) => {
+    if (visibleHistory.length === 0) return '';
+    return visibleHistory.reduce((path, pt, index) => {
       const x = xScale(pt.t);
       const val = pt.concentrations[speciesId] ?? 0;
       const y = yConcScale(val);
@@ -77,8 +114,8 @@ export const EquilibriumChart: React.FC<EquilibriumChartProps> = ({
 
   // Generate SVG path for reaction rates
   const generateRatePath = (type: 'forward' | 'reverse') => {
-    if (history.length === 0) return '';
-    return history.reduce((path, pt, index) => {
+    if (visibleHistory.length === 0) return '';
+    return visibleHistory.reduce((path, pt, index) => {
       const x = xScale(pt.t);
       const val = pt.rates[type] ?? 0;
       const y = yRateScale(val);
@@ -92,16 +129,15 @@ export const EquilibriumChart: React.FC<EquilibriumChartProps> = ({
     const mouseX = e.clientX - rect.left;
     const svgX = (mouseX / rect.width) * width;
 
-    if (svgX < padding.left || svgX > width - padding.right || history.length === 0) {
+    if (svgX < padding.left || svgX > width - padding.right || visibleHistory.length === 0) {
       setHoveredPoint(null);
       return;
     }
 
-    const tHover = ((svgX - padding.left) / graphWidth) * maxTime;
-    // Find closest history point
-    let closest = history[0];
+    const tHover = minTime + ((svgX - padding.left) / graphWidth) * timeSpan;
+    let closest = visibleHistory[0];
     let minDiff = Math.abs(closest.t - tHover);
-    for (const pt of history) {
+    for (const pt of visibleHistory) {
       const diff = Math.abs(pt.t - tHover);
       if (diff < minDiff) {
         minDiff = diff;
@@ -112,6 +148,7 @@ export const EquilibriumChart: React.FC<EquilibriumChartProps> = ({
   };
 
   const currentPoint = hoveredPoint || history[history.length - 1];
+  const eqX = equilibriumStartPoint ? xScale(equilibriumStartPoint.t) : null;
 
   return (
     <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-xl">
@@ -131,30 +168,61 @@ export const EquilibriumChart: React.FC<EquilibriumChartProps> = ({
           </p>
         </div>
 
-        {/* View Toggle */}
-        <div className="flex items-center bg-slate-950 p-1 rounded-xl border border-slate-800 text-xs">
-          <button
-            onClick={() => setViewMode('concentrations')}
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-medium transition-all ${
-              viewMode === 'concentrations'
-                ? 'bg-indigo-600 text-white shadow-sm'
-                : 'text-slate-400 hover:text-slate-200'
-            }`}
-          >
-            <Layers className="w-3.5 h-3.5" />
-            Concentración [M]
-          </button>
-          <button
-            onClick={() => setViewMode('rates')}
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-medium transition-all ${
-              viewMode === 'rates'
-                ? 'bg-indigo-600 text-white shadow-sm'
-                : 'text-slate-400 hover:text-slate-200'
-            }`}
-          >
-            <Zap className="w-3.5 h-3.5" />
-            Velocidades (vd / vi)
-          </button>
+        {/* View & Time Axis Toggles */}
+        <div className="flex flex-wrap items-center gap-2">
+          {/* Time axis mode toggle */}
+          <div className="flex items-center bg-slate-950 p-1 rounded-xl border border-slate-800 text-xs">
+            <button
+              onClick={() => setTimeAxisMode('full')}
+              className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg font-medium transition-all ${
+                timeAxisMode === 'full'
+                  ? 'bg-slate-800 text-indigo-300 shadow-sm'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+              title="Ajustar la escala para ver toda la reacción desde t = 0 s"
+            >
+              <Maximize2 className="w-3.5 h-3.5" />
+              Escala completa
+            </button>
+            <button
+              onClick={() => setTimeAxisMode('sliding')}
+              className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg font-medium transition-all ${
+                timeAxisMode === 'sliding'
+                  ? 'bg-slate-800 text-indigo-300 shadow-sm'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+              title="Desplazar el eje de tiempo mostrando los últimos 25 segundos"
+            >
+              <Clock className="w-3.5 h-3.5" />
+              Ventana móvil (25s)
+            </button>
+          </div>
+
+          {/* Series toggle */}
+          <div className="flex items-center bg-slate-950 p-1 rounded-xl border border-slate-800 text-xs">
+            <button
+              onClick={() => setViewMode('concentrations')}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-medium transition-all ${
+                viewMode === 'concentrations'
+                  ? 'bg-indigo-600 text-white shadow-sm'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              <Layers className="w-3.5 h-3.5" />
+              Concentración [M]
+            </button>
+            <button
+              onClick={() => setViewMode('rates')}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-medium transition-all ${
+                viewMode === 'rates'
+                  ? 'bg-indigo-600 text-white shadow-sm'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              <Zap className="w-3.5 h-3.5" />
+              Velocidades (vd / vi)
+            </button>
+          </div>
         </div>
       </div>
 
@@ -195,7 +263,7 @@ export const EquilibriumChart: React.FC<EquilibriumChartProps> = ({
         </div>
       </div>
 
-      {/* Main SVG Graph */}
+      {/* Main SVG Graph (Unobstructed - No floating overlay!) */}
       <div className="relative w-full overflow-hidden rounded-xl bg-slate-950 border border-slate-800">
         <svg
           viewBox={`0 0 ${width} ${height}`}
@@ -204,6 +272,9 @@ export const EquilibriumChart: React.FC<EquilibriumChartProps> = ({
           onMouseLeave={() => setHoveredPoint(null)}
         >
           <defs>
+            <clipPath id="chartPlotClip">
+              <rect x={padding.left} y={padding.top} width={graphWidth} height={graphHeight} />
+            </clipPath>
             {/* Gradients */}
             <linearGradient id="eqZoneGradient" x1="0" y1="0" x2="0" y2="1">
               <stop offset="0%" stopColor="#10b981" stopOpacity="0.12" />
@@ -227,64 +298,94 @@ export const EquilibriumChart: React.FC<EquilibriumChartProps> = ({
             fill="url(#gridPattern)"
           />
 
-          {/* Equilibrium shaded region if reached */}
-          {equilibriumStartPoint && (
-            <g>
-              <rect
-                x={xScale(equilibriumStartPoint.t)}
-                y={padding.top}
-                width={width - padding.right - xScale(equilibriumStartPoint.t)}
-                height={graphHeight}
-                fill="url(#eqZoneGradient)"
-              />
-              <line
-                x1={xScale(equilibriumStartPoint.t)}
-                y1={padding.top}
-                x2={xScale(equilibriumStartPoint.t)}
-                y2={padding.top + graphHeight}
-                stroke="#10b981"
-                strokeWidth="1.5"
-                strokeDasharray="4 3"
-              />
-              <text
-                x={xScale(equilibriumStartPoint.t) + 6}
-                y={padding.top + 16}
-                fill="#10b981"
-                fontSize="10"
-                fontWeight="600"
-              >
-                Equilibrio alcanzado
-              </text>
-            </g>
-          )}
+          {/* Zone Shading inside clipped plot area */}
+          <g clipPath="url(#chartPlotClip)">
+            {eqX !== null ? (
+              <>
+                {/* Non-equilibrium zone before eqX */}
+                {eqX > padding.left && (
+                  <g>
+                    <rect
+                      x={padding.left}
+                      y={padding.top}
+                      width={Math.max(0, eqX - padding.left)}
+                      height={graphHeight}
+                      fill="url(#nonEqZoneGradient)"
+                    />
+                    {eqX - padding.left > 140 && (
+                      <text
+                        x={padding.left + 8}
+                        y={padding.top + 16}
+                        fill="#f59e0b"
+                        fontSize="10"
+                        fontWeight="600"
+                      >
+                        Fase Cinética (Fuera de Eq.)
+                      </text>
+                    )}
+                  </g>
+                )}
 
-          {/* Outside equilibrium region indicator */}
-          {equilibriumStartPoint && xScale(equilibriumStartPoint.t) > padding.left + 20 && (
-            <g>
-              <rect
-                x={padding.left}
-                y={padding.top}
-                width={xScale(equilibriumStartPoint.t) - padding.left}
-                height={graphHeight}
-                fill="url(#nonEqZoneGradient)"
-              />
-              <text
-                x={padding.left + 8}
-                y={padding.top + 16}
-                fill="#f59e0b"
-                fontSize="10"
-                fontWeight="600"
-              >
-                Fase Cinética (Fuera de Eq.)
-              </text>
-            </g>
-          )}
+                {/* Equilibrium zone after eqX */}
+                <g>
+                  <rect
+                    x={Math.max(padding.left, eqX)}
+                    y={padding.top}
+                    width={Math.max(0, width - padding.right - Math.max(padding.left, eqX))}
+                    height={graphHeight}
+                    fill="url(#eqZoneGradient)"
+                  />
+                  {eqX >= padding.left && eqX <= width - padding.right && (
+                    <line
+                      x1={eqX}
+                      y1={padding.top}
+                      x2={eqX}
+                      y2={padding.top + graphHeight}
+                      stroke="#10b981"
+                      strokeWidth="1.5"
+                      strokeDasharray="4 3"
+                    />
+                  )}
+                  <text
+                    x={Math.min(Math.max(padding.left + 8, eqX + 6), width - padding.right - 115)}
+                    y={padding.top + 16}
+                    fill="#10b981"
+                    fontSize="10"
+                    fontWeight="600"
+                  >
+                    Equilibrio alcanzado
+                  </text>
+                </g>
+              </>
+            ) : (
+              /* Whole visible window is outside equilibrium */
+              history.length > 0 && (
+                <g>
+                  <rect
+                    x={padding.left}
+                    y={padding.top}
+                    width={graphWidth}
+                    height={graphHeight}
+                    fill="url(#nonEqZoneGradient)"
+                  />
+                  <text
+                    x={padding.left + 8}
+                    y={padding.top + 16}
+                    fill="#f59e0b"
+                    fontSize="10"
+                    fontWeight="600"
+                  >
+                    Fase Cinética (Fuera de Eq.)
+                  </text>
+                </g>
+              )
+            )}
+          </g>
 
           {/* Y Axis Grid Lines & Labels */}
           {[0, 0.25, 0.5, 0.75, 1].map((pct) => {
             const y = padding.top + graphHeight * (1 - pct);
-            const val =
-              viewMode === 'concentrations' ? pct * maxConcentration : pct * maxRate;
+            const val = viewMode === 'concentrations' ? pct * maxConcentration : pct * maxRate;
             return (
               <g key={pct}>
                 <line
@@ -310,10 +411,10 @@ export const EquilibriumChart: React.FC<EquilibriumChartProps> = ({
             );
           })}
 
-          {/* X Axis Grid Lines & Labels (Time in s) */}
+          {/* X Axis Grid Lines & Labels (Time in s, dynamically scaled from minTime to maxTime) */}
           {[0, 0.2, 0.4, 0.6, 0.8, 1].map((pct) => {
             const x = padding.left + graphWidth * pct;
-            const tVal = pct * maxTime;
+            const tVal = minTime + pct * timeSpan;
             return (
               <g key={pct}>
                 <line
@@ -333,7 +434,7 @@ export const EquilibriumChart: React.FC<EquilibriumChartProps> = ({
                   fontSize="10"
                   fontFamily="monospace"
                 >
-                  {tVal.toFixed(0)}s
+                  {tVal < 10 ? tVal.toFixed(1) : tVal.toFixed(0)}s
                 </text>
               </g>
             );
@@ -366,7 +467,9 @@ export const EquilibriumChart: React.FC<EquilibriumChartProps> = ({
             fontSize="11"
             fontWeight="500"
           >
-            Tiempo transcurrido (segundos)
+            {timeAxisMode === 'sliding'
+              ? `Tiempo transcurrido — Ventana móvil (${minTime.toFixed(0)}s – ${maxTime.toFixed(0)}s)`
+              : 'Tiempo transcurrido (segundos)'}
           </text>
           <text
             x={-(padding.top + graphHeight / 2)}
@@ -380,214 +483,203 @@ export const EquilibriumChart: React.FC<EquilibriumChartProps> = ({
             {viewMode === 'concentrations' ? 'Concentración molar [mol/L]' : 'Velocidad de reacción [mol/(L·s)]'}
           </text>
 
-          {/* Perturbation vertical markers */}
-          {perturbations.map((pert) => {
-            const px = xScale(pert.t);
-            if (px < padding.left || px > width - padding.right) return null;
-            return (
-              <g key={pert.id}>
-                <line
-                  x1={px}
-                  y1={padding.top}
-                  x2={px}
-                  y2={padding.top + graphHeight}
-                  stroke="#f43f5e"
-                  strokeWidth="1.5"
-                  strokeDasharray="3 3"
-                />
-                <circle cx={px} cy={padding.top + 10} r="4" fill="#f43f5e" />
-                <text
-                  x={px + 4}
-                  y={padding.top + 32}
-                  fill="#f43f5e"
-                  fontSize="9"
-                  fontWeight="bold"
-                >
-                  ⚡ Perturbación
-                </text>
-              </g>
-            );
-          })}
-
-          {/* Data Lines */}
-          {viewMode === 'concentrations' ? (
-            // Species concentrations
-            reaction.species.map((sp) => {
-              const pathStr = generateConcentrationPath(sp.id);
+          {/* Clipped Data Curves, Perturbations & Hover Markers */}
+          <g clipPath="url(#chartPlotClip)">
+            {/* Perturbation vertical markers */}
+            {perturbations.map((pert) => {
+              const px = xScale(pert.t);
+              if (px < padding.left || px > width - padding.right) return null;
+              const labelX = px > width - padding.right - 85 ? px - 78 : px + 4;
               return (
+                <g key={pert.id}>
+                  <line
+                    x1={px}
+                    y1={padding.top}
+                    x2={px}
+                    y2={padding.top + graphHeight}
+                    stroke="#f43f5e"
+                    strokeWidth="1.5"
+                    strokeDasharray="3 3"
+                  />
+                  <circle cx={px} cy={padding.top + 10} r="4" fill="#f43f5e" />
+                  <text
+                    x={labelX}
+                    y={padding.top + 32}
+                    fill="#f43f5e"
+                    fontSize="9"
+                    fontWeight="bold"
+                  >
+                    ⚡ Perturbación
+                  </text>
+                </g>
+              );
+            })}
+
+            {/* Data Lines */}
+            {viewMode === 'concentrations' ? (
+              reaction.species.map((sp) => {
+                const pathStr = generateConcentrationPath(sp.id);
+                return (
+                  <path
+                    key={sp.id}
+                    d={pathStr}
+                    fill="none"
+                    stroke={sp.color}
+                    strokeWidth="2.75"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                );
+              })
+            ) : (
+              <>
                 <path
-                  key={sp.id}
-                  d={pathStr}
+                  d={generateRatePath('forward')}
                   fill="none"
-                  stroke={sp.color}
+                  stroke="#38bdf8"
                   strokeWidth="2.75"
                   strokeLinecap="round"
                   strokeLinejoin="round"
                 />
-              );
-            })
-          ) : (
-            // Reaction rates (Forward and Reverse)
-            <>
-              <path
-                d={generateRatePath('forward')}
-                fill="none"
-                stroke="#38bdf8"
-                strokeWidth="2.75"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              />
-              <path
-                d={generateRatePath('reverse')}
-                fill="none"
-                stroke="#f97316"
-                strokeWidth="2.75"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              />
-            </>
-          )}
+                <path
+                  d={generateRatePath('reverse')}
+                  fill="none"
+                  stroke="#f97316"
+                  strokeWidth="2.75"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </>
+            )}
 
-          {/* Hover Crosshair and Inspection Tooltip */}
-          {hoveredPoint && (
-            <g>
-              <line
-                x1={xScale(hoveredPoint.t)}
-                y1={padding.top}
-                x2={xScale(hoveredPoint.t)}
-                y2={padding.top + graphHeight}
-                stroke="#ffffff"
-                strokeWidth="1"
-                strokeDasharray="3 3"
-                opacity="0.7"
-              />
-              {/* Highlight dots on lines */}
-              {viewMode === 'concentrations'
-                ? reaction.species.map((sp) => {
-                    const c = hoveredPoint.concentrations[sp.id] ?? 0;
-                    return (
+            {/* Hover Crosshair and Inspection Dots */}
+            {hoveredPoint && (
+              <g>
+                <line
+                  x1={xScale(hoveredPoint.t)}
+                  y1={padding.top}
+                  x2={xScale(hoveredPoint.t)}
+                  y2={padding.top + graphHeight}
+                  stroke="#ffffff"
+                  strokeWidth="1"
+                  strokeDasharray="3 3"
+                  opacity="0.7"
+                />
+                {viewMode === 'concentrations'
+                  ? reaction.species.map((sp) => {
+                      const c = hoveredPoint.concentrations[sp.id] ?? 0;
+                      return (
+                        <circle
+                          key={sp.id}
+                          cx={xScale(hoveredPoint.t)}
+                          cy={yConcScale(c)}
+                          r="4.5"
+                          fill={sp.color}
+                          stroke="#ffffff"
+                          strokeWidth="1.5"
+                        />
+                      );
+                    })
+                  : [
+                      { key: 'forward', color: '#38bdf8', val: hoveredPoint.rates.forward },
+                      { key: 'reverse', color: '#f97316', val: hoveredPoint.rates.reverse },
+                    ].map((item) => (
                       <circle
-                        key={sp.id}
+                        key={item.key}
                         cx={xScale(hoveredPoint.t)}
-                        cy={yConcScale(c)}
+                        cy={yRateScale(item.val)}
                         r="4.5"
-                        fill={sp.color}
+                        fill={item.color}
                         stroke="#ffffff"
                         strokeWidth="1.5"
                       />
-                    );
-                  })
-                : [
-                    { key: 'forward', color: '#38bdf8', val: hoveredPoint.rates.forward },
-                    { key: 'reverse', color: '#f97316', val: hoveredPoint.rates.reverse },
-                  ].map((item) => (
-                    <circle
-                      key={item.key}
-                      cx={xScale(hoveredPoint.t)}
-                      cy={yRateScale(item.val)}
-                      r="4.5"
-                      fill={item.color}
-                      stroke="#ffffff"
-                      strokeWidth="1.5"
-                    />
-                  ))}
-            </g>
-          )}
+                    ))}
+              </g>
+            )}
+          </g>
         </svg>
+      </div>
 
-        {/* Hover / Current Tooltip Floating Info */}
-        <div className="absolute top-2 right-2 bg-slate-900/90 backdrop-blur-md border border-slate-700/80 rounded-xl p-3 shadow-lg pointer-events-none text-xs">
-          <div className="flex items-center justify-between gap-4 border-b border-slate-800 pb-1.5 mb-2">
-            <span className="text-slate-400 font-mono">
-              t = {currentPoint?.t.toFixed(1)} s
+      {/* Dedicated Non-Overlapping Readout & Legend Panel (Placed cleanly below the SVG) */}
+      <div
+        className={`mt-3 rounded-xl border p-3 transition-colors ${
+          hoveredPoint
+            ? 'bg-indigo-950/30 border-indigo-500/40'
+            : 'bg-slate-950/70 border-slate-800/80'
+        }`}
+      >
+        <div className="flex flex-wrap items-center justify-between gap-2 pb-2 mb-2.5 border-b border-slate-800/80 text-xs">
+          <div className="flex items-center gap-2">
+            <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">
+              {hoveredPoint ? 'Inspección en el gráfico:' : 'Valores actuales en tiempo real:'}
+            </span>
+            <span className="font-mono font-bold text-white bg-slate-900 px-2 py-0.5 rounded border border-slate-700">
+              t = {(currentPoint?.t ?? currentTime).toFixed(1)} s
             </span>
             <span
-              className={`font-semibold px-2 py-0.5 rounded text-[10px] ${
+              className={`font-semibold px-2 py-0.5 rounded text-[11px] ${
                 currentPoint?.isEquilibrium
-                  ? 'bg-emerald-500/20 text-emerald-300'
-                  : 'bg-amber-500/20 text-amber-300'
+                  ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                  : 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
               }`}
             >
               {currentPoint?.isEquilibrium ? 'En Equilibrio' : 'Fuera de Eq.'}
             </span>
           </div>
 
-          {viewMode === 'concentrations' ? (
-            <div className="space-y-1">
-              {reaction.species.map((sp) => (
-                <div key={sp.id} className="flex items-center justify-between gap-4 font-mono text-[11px]">
-                  <div className="flex items-center gap-1.5">
-                    <span
-                      className="w-2.5 h-2.5 rounded-full"
-                      style={{ backgroundColor: sp.color }}
-                    />
-                    <span className="text-slate-300 font-sans">{sp.formula}:</span>
-                  </div>
-                  <span className="font-bold text-white">
-                    {(currentPoint?.concentrations[sp.id] ?? 0).toFixed(4)} M
-                  </span>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <div className="space-y-1 font-mono text-[11px]">
-              <div className="flex items-center justify-between gap-4">
-                <div className="flex items-center gap-1.5 text-sky-400">
-                  <span className="w-2.5 h-2.5 rounded-full bg-sky-400" />
-                  <span>vd (Directa):</span>
-                </div>
-                <span className="font-bold text-white">
-                  {currentPoint?.rates.forward.toFixed(4)}
-                </span>
-              </div>
-              <div className="flex items-center justify-between gap-4">
-                <div className="flex items-center gap-1.5 text-orange-400">
-                  <span className="w-2.5 h-2.5 rounded-full bg-orange-400" />
-                  <span>vi (Inversa):</span>
-                </div>
-                <span className="font-bold text-white">
-                  {currentPoint?.rates.reverse.toFixed(4)}
-                </span>
-              </div>
-            </div>
-          )}
+          <span className="text-[11px] text-slate-400">
+            Pasa el cursor sobre el gráfico para inspeccionar valores en cada instante
+          </span>
         </div>
-      </div>
 
-      {/* Legend & Summary Cards */}
-      <div className="mt-4 flex flex-wrap items-center justify-between gap-3 text-xs">
-        <div className="flex flex-wrap items-center gap-4">
-          <span className="text-slate-400 font-medium">Leyenda:</span>
-          {viewMode === 'concentrations' ? (
-            reaction.species.map((sp) => (
-              <div key={sp.id} className="flex items-center gap-2">
-                <span
-                  className="w-3 h-3 rounded-full shadow-sm"
-                  style={{ backgroundColor: sp.color }}
-                />
-                <span className="text-slate-200 font-semibold">{sp.formula}</span>
-                <span className="text-slate-500 text-[11px]">
-                  ({sp.isReactant ? 'Reactivo' : 'Producto'}, {sp.coefficient} mol)
+        {/* Species / Rates Chips */}
+        {viewMode === 'concentrations' ? (
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+            {reaction.species.map((sp) => (
+              <div
+                key={sp.id}
+                className="flex items-center justify-between gap-3 bg-slate-900/90 border border-slate-800 rounded-lg px-3 py-2 text-xs"
+              >
+                <div className="flex items-center gap-2 min-w-0">
+                  <span
+                    className="w-3 h-3 rounded-full shrink-0 shadow-sm"
+                    style={{ backgroundColor: sp.color }}
+                  />
+                  <div className="truncate">
+                    <span className="text-slate-100 font-bold">{sp.formula}</span>
+                    <span className="text-slate-500 text-[11px] ml-1.5">
+                      ({sp.isReactant ? 'Reactivo' : 'Producto'}, {sp.coefficient} mol)
+                    </span>
+                  </div>
+                </div>
+                <span className="font-mono font-bold text-white shrink-0">
+                  {(currentPoint?.concentrations[sp.id] ?? 0).toFixed(4)} M
                 </span>
               </div>
-            ))
-          ) : (
-            <>
+            ))}
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            <div className="flex items-center justify-between gap-3 bg-slate-900/90 border border-slate-800 rounded-lg px-3 py-2 text-xs">
               <div className="flex items-center gap-2">
-                <span className="w-3 h-3 rounded-full bg-sky-400" />
+                <span className="w-3 h-3 rounded-full bg-sky-400 shrink-0" />
                 <span className="text-slate-200 font-semibold">vd (Directa: Reactivos → Productos)</span>
               </div>
+              <span className="font-mono font-bold text-sky-300">
+                {(currentPoint?.rates.forward ?? 0).toFixed(4)} mol/(L·s)
+              </span>
+            </div>
+            <div className="flex items-center justify-between gap-3 bg-slate-900/90 border border-slate-800 rounded-lg px-3 py-2 text-xs">
               <div className="flex items-center gap-2">
-                <span className="w-3 h-3 rounded-full bg-orange-400" />
+                <span className="w-3 h-3 rounded-full bg-orange-400 shrink-0" />
                 <span className="text-slate-200 font-semibold">vi (Inversa: Productos → Reactivos)</span>
               </div>
-            </>
-          )}
-        </div>
-
-        <div className="text-slate-400 text-[11px]">
-          Pasa el cursor sobre el gráfico para ver datos numéricos en cada instante.
-        </div>
+              <span className="font-mono font-bold text-orange-300">
+                {(currentPoint?.rates.reverse ?? 0).toFixed(4)} mol/(L·s)
+              </span>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
