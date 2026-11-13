@@ -1,0 +1,6 @@
+{
+  "name": "EquilibrioQuímicoLab",
+  "description": "Simulador interactivo de equilibrio químico, cinética de procesos reversibles y principio de Le Châtelier con gráficos en tiempo real y modelo de partículas.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
